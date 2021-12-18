@@ -251,6 +251,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		}
 	}
+	if reply.VoteGranted {
+		rf.hearHeartBeat = true
+	}
 	DPrintf("[VoteRequest] %v reply to %v term %v success %v\n", rf.me, args.CandidateID, reply.Term, reply.VoteGranted)
 }
 
