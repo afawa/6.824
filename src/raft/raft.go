@@ -92,7 +92,6 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	applyCh       chan ApplyMsg
-	inputCh       chan interface{}
 	hearHeartBeat bool
 	state         STATE
 	currentTerm   int
@@ -346,6 +345,18 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	isLeader = rf.state == LEADER
+	if isLeader {
+		term = rf.currentTerm
+		index = len(rf.logs) + 1
+		log := Log{}
+		log.command = command
+		log.term = term
+		log.index = index
+		rf.logs = append(rf.logs, log)
+	}
 
 	return index, term, isLeader
 }
@@ -391,12 +402,9 @@ func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int,
 func (rf *Raft) doHeartBeat(term int, ch chan LeaderMsg) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if term != rf.currentTerm || rf.state != LEADER {
-		return
-	}
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.leaderTask(i, rf.currentTerm, rf.me, 0, 0, make([]interface{}, 0), 0, ch)
+			go rf.leaderTask(i, term, rf.me, 0, 0, make([]interface{}, 0), 0, ch)
 		}
 	}
 }
@@ -405,12 +413,49 @@ func (rf *Raft) leaderHeartBeatLoop(term int, ch chan LeaderMsg) {
 	rf.doHeartBeat(term, ch)
 	for rf.killed() == false {
 		time.Sleep(150 * time.Millisecond)
+		if !rf.leaderCheck(term) {
+			break
+		}
 		rf.doHeartBeat(term, ch)
 	}
 }
 
+func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.leaderCheck(term) {
+		return
+	}
+	if rf.logs[len(rf.logs)-1].index < rf.nextIndex[target] {
+		return
+	}
+	// send start from next index
+	prevlogindex := rf.nextIndex[target] - 1
+	var prevlogterm int
+	if rf.nextIndex[target] == 1 {
+		prevlogterm = 0
+	} else {
+		prevlogterm = rf.logs[rf.nextIndex[target]-2].term
+	}
+	var commands []interface{}
+	for i := rf.nextIndex[target] - 1; i < len(rf.logs); i++ {
+		commands = append(commands, rf.logs[i])
+	}
+	go rf.leaderTask(target, term, rf.me, prevlogindex, prevlogterm, commands, rf.commitIndex, ch)
+}
+
 func (rf *Raft) leaderTaskLoop(term int, ch chan LeaderMsg) {
-	// 2B
+	for rf.killed() == false {
+		time.Sleep(10 * time.Millisecond)
+		if !rf.leaderCheck(term) {
+			break
+		}
+		for i := range rf.peers {
+			if i != rf.me {
+				go rf.doSendLog(term, i, ch)
+			}
+		}
+	}
 }
 
 func (rf *Raft) leaderCheck(term int) bool {
@@ -433,6 +478,9 @@ func (rf *Raft) leader2follower(msg *LeaderMsg) {
 
 func (rf *Raft) leaderWait(term int, ch <-chan LeaderMsg) {
 	for rf.killed() == false {
+		if !rf.leaderCheck(term) {
+			break
+		}
 		msg := <-ch
 		if !msg.ok {
 			continue
@@ -501,6 +549,7 @@ func (rf *Raft) candidateWait(term int, ch <-chan VoteMsg) {
 	voteforcounter := 1
 	for counter < len(rf.peers) {
 		msg := <-ch
+		counter++
 		if !msg.ok {
 			continue
 		}
@@ -513,7 +562,6 @@ func (rf *Raft) candidateWait(term int, ch <-chan VoteMsg) {
 			rf.candidate2follower(&msg)
 			break
 		}
-		counter++
 		if msg.reply.VoteGranted {
 			voteforcounter++
 			if voteforcounter > (len(rf.peers) / 2) {
