@@ -291,7 +291,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				reply.Success = false
 			}
 		} else {
-			if rf.logs[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+			if len(rf.logs) >= args.PrevLogIndex && rf.logs[args.PrevLogIndex-1].Term == args.PrevLogTerm {
 				reply.Success = true
 				idx := args.PrevLogIndex - 1
 				for i := range args.Entries {
@@ -311,7 +311,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		oldidx := rf.commitIndex
-		if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit > rf.commitIndex && len(args.Entries) > 0 {
 			rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(args.Entries[len(args.Entries)-1].Index)))
 		}
 		for i := 0; i < rf.commitIndex-oldidx; i++ {
