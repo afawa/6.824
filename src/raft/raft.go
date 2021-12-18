@@ -255,7 +255,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	DPrintf("before [AppendEntries] %v receive from %v term %v\n", rf.me, args.LeaderId, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("[AppendEntries] %v receive from %v term %v\n", rf.me, args.LeaderId, args.Term)
@@ -271,6 +270,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		DPrintf("[AppendEntries] %v change to follower\n", rf.me)
 	} else {
+		if rf.state == LEADER {
+			fmt.Printf("[Fatal Error] In the same term have 2 different leader, %v and %v\n", rf.me, args.LeaderId)
+		} else if rf.state == CANDIDATE {
+			DPrintf("[AppendEntries] %v change from candidate to follower\n", rf.me)
+			rf.state = FOLLOWER
+			rf.votedFor = args.LeaderId
+		}
 		if len(args.Entries) == 0 {
 			//heartbeat
 			DPrintf("[AppendEntries] %v receive from %v term %v Heart Beat\n", rf.me, args.LeaderId, args.Term)
@@ -386,12 +392,6 @@ func (rf *Raft) doHeartBeat(term int, ch chan LeaderMsg) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if term != rf.currentTerm || rf.state != LEADER {
-		// msg := LeaderMsg{}
-		// msg.id = rf.me
-		// msg.ok = true
-		// msg.reply.Success = false
-		// msg.reply.Term = rf.currentTerm
-		// ch <- msg
 		return
 	}
 	for i := range rf.peers {
@@ -449,7 +449,7 @@ func (rf *Raft) leaderWait(term int, ch <-chan LeaderMsg) {
 }
 
 func (rf *Raft) leaderStart(term int) {
-	ch := make(chan LeaderMsg)
+	ch := make(chan LeaderMsg, 100000)
 	go rf.leaderHeartBeatLoop(term, ch)
 	// go rf.leaderTaskLoop(term, ch)
 	go rf.leaderWait(term, ch)
@@ -537,7 +537,7 @@ func (rf *Raft) doElection() {
 
 		DPrintf("Server %v become candidate term %v\n", rf.me, rf.currentTerm)
 
-		ch := make(chan VoteMsg)
+		ch := make(chan VoteMsg, len(rf.peers))
 		for i := range rf.peers {
 			if i != rf.me {
 				var lastlogindex int
