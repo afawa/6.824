@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -76,9 +77,9 @@ const (
 )
 
 type Log struct {
-	command interface{}
-	term    int
-	index   int
+	Command interface{}
+	Term    int
+	Index   int
 }
 
 type Raft struct {
@@ -202,7 +203,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []interface{}
+	Entries      []Log
 	LeaderCommit int
 }
 
@@ -223,7 +224,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if len(rf.logs) == 0 {
 		lastterm = 0
 	} else {
-		lastterm = rf.logs[len(rf.logs)-1].term
+		lastterm = rf.logs[len(rf.logs)-1].Term
 	}
 	DPrintf("[VoteRequest] %v term %v lastterm %v\n", rf.me, rf.currentTerm, lastterm)
 	if args.Term < rf.currentTerm {
@@ -250,6 +251,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			}
 		}
 	}
+	if reply.VoteGranted {
+		rf.hearHeartBeat = true
+	}
 	DPrintf("[VoteRequest] %v reply to %v term %v success %v\n", rf.me, args.CandidateID, reply.Term, reply.VoteGranted)
 }
 
@@ -257,8 +261,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("[AppendEntries] %v receive from %v term %v\n", rf.me, args.LeaderId, args.Term)
+	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
 		reply.Success = false
 	} else if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -276,12 +280,45 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.state = FOLLOWER
 			rf.votedFor = args.LeaderId
 		}
-		if len(args.Entries) == 0 {
-			//heartbeat
-			DPrintf("[AppendEntries] %v receive from %v term %v Heart Beat\n", rf.me, args.LeaderId, args.Term)
-			rf.hearHeartBeat = true
-			reply.Success = true
-			reply.Term = rf.currentTerm
+		rf.hearHeartBeat = true
+		// success
+		if args.PrevLogIndex == 0 {
+			if len(rf.logs) == 0 {
+				reply.Success = true
+				rf.logs = append(rf.logs, args.Entries...)
+			} else {
+				reply.Success = false
+			}
+		} else {
+			if len(rf.logs) >= args.PrevLogIndex && rf.logs[args.PrevLogIndex-1].Term == args.PrevLogTerm {
+				reply.Success = true
+				idx := args.PrevLogIndex - 1
+				for i := range args.Entries {
+					idx++
+					if idx == len(rf.logs) {
+						rf.logs = append(rf.logs, args.Entries[i:]...)
+						break
+					}
+					if rf.logs[idx].Term != args.Entries[i].Term {
+						rf.logs = rf.logs[:idx-1]
+						rf.logs = append(rf.logs, args.Entries[i:]...)
+						break
+					}
+				}
+			} else {
+				reply.Success = false
+			}
+		}
+		oldidx := rf.commitIndex
+		if args.LeaderCommit > rf.commitIndex && len(args.Entries) > 0 {
+			rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(args.Entries[len(args.Entries)-1].Index)))
+		}
+		for i := 0; i < rf.commitIndex-oldidx; i++ {
+			msg := ApplyMsg{}
+			msg.CommandValid = true
+			msg.Command = rf.logs[oldidx+i].Command
+			msg.CommandIndex = rf.logs[oldidx+i].Index
+			rf.applyCh <- msg
 		}
 	}
 }
@@ -352,9 +389,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		index = len(rf.logs) + 1
 		log := Log{}
-		log.command = command
-		log.term = term
-		log.index = index
+		log.Command = command
+		log.Term = term
+		log.Index = index
 		rf.logs = append(rf.logs, log)
 	}
 
@@ -382,7 +419,7 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int, prevLogTerm int, entries []interface{}, leaderCommit int, ch chan<- LeaderMsg) {
+func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int, prevLogTerm int, entries []Log, leaderCommit int, ch chan<- LeaderMsg) {
 	args := AppendEntriesArgs{}
 	reply := AppendEntriesReply{}
 	args.Term = term
@@ -404,7 +441,12 @@ func (rf *Raft) doHeartBeat(term int, ch chan LeaderMsg) {
 	defer rf.mu.Unlock()
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.leaderTask(i, term, rf.me, 0, 0, make([]interface{}, 0), 0, ch)
+			if len(rf.logs) == 0 {
+				go rf.leaderTask(i, term, rf.me, 0, 0, make([]Log, 0), rf.commitIndex, ch)
+			} else {
+				tmp := len(rf.logs) - 1
+				go rf.leaderTask(i, term, rf.me, rf.logs[tmp].Index, rf.logs[tmp].Term, make([]Log, 0), rf.commitIndex, ch)
+			}
 		}
 	}
 }
@@ -426,7 +468,7 @@ func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) {
 	if !rf.leaderCheck(term) {
 		return
 	}
-	if rf.logs[len(rf.logs)-1].index < rf.nextIndex[target] {
+	if rf.logs[len(rf.logs)-1].Index < rf.nextIndex[target] {
 		return
 	}
 	// send start from next index
@@ -435,13 +477,13 @@ func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) {
 	if rf.nextIndex[target] == 1 {
 		prevlogterm = 0
 	} else {
-		prevlogterm = rf.logs[rf.nextIndex[target]-2].term
+		prevlogterm = rf.logs[rf.nextIndex[target]-2].Term
 	}
-	var commands []interface{}
+	var logs []Log
 	for i := rf.nextIndex[target] - 1; i < len(rf.logs); i++ {
-		commands = append(commands, rf.logs[i])
+		logs = append(logs, rf.logs[i])
 	}
-	go rf.leaderTask(target, term, rf.me, prevlogindex, prevlogterm, commands, rf.commitIndex, ch)
+	go rf.leaderTask(target, term, rf.me, prevlogindex, prevlogterm, logs, rf.commitIndex, ch)
 }
 
 func (rf *Raft) leaderTaskLoop(term int, ch chan LeaderMsg) {
@@ -472,7 +514,7 @@ func (rf *Raft) leader2follower(msg *LeaderMsg) {
 		rf.currentTerm = msg.reply.Term
 		rf.state = FOLLOWER
 		rf.votedFor = -1
-		rf.hearHeartBeat = false
+		rf.hearHeartBeat = true
 	}
 }
 
@@ -594,8 +636,8 @@ func (rf *Raft) doElection() {
 					lastlogindex = 0
 					lastlogterm = 0
 				} else {
-					lastlogindex = rf.logs[len(rf.logs)-1].index
-					lastlogterm = rf.logs[len(rf.logs)-1].term
+					lastlogindex = rf.logs[len(rf.logs)-1].Index
+					lastlogterm = rf.logs[len(rf.logs)-1].Term
 				}
 				go rf.candidateTask(i, rf.currentTerm, lastlogindex, lastlogterm, ch)
 			}
