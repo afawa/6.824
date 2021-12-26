@@ -400,23 +400,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	rf.mu.Lock()
-	if rf.CurrentTerm != args.Term {
-		rf.mu.Unlock()
-		return false
-	}
-	rf.mu.Unlock()
+	// rf.mu.Lock()
+	// if rf.CurrentTerm != args.Term {
+	// 	rf.mu.Unlock()
+	// 	return false
+	// }
+	// rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	rf.mu.Lock()
-	if rf.CurrentTerm != args.Term {
-		rf.mu.Unlock()
-		return false
-	}
-	rf.mu.Unlock()
+	// rf.mu.Lock()
+	// if rf.CurrentTerm != args.Term {
+	// 	rf.mu.Unlock()
+	// 	return false
+	// }
+	// rf.mu.Unlock()
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
@@ -598,7 +598,7 @@ func (rf *Raft) leaderTaskLoop(term int, target int) {
 func (rf *Raft) leaderHeartBeatLoop(term int, target int) {
 	ch := make(chan LeaderMsg)
 	go rf.leaderHeartBeat(term, target, ch)
-	for rf.killed() == false {
+	for !rf.killed() {
 		time.Sleep(150 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
@@ -631,9 +631,6 @@ func (rf *Raft) leaderRecvMsg(term int, msg *LeaderMsg) {
 	DPrintf("[Recv Msg] server %v receive msg from %v ok %v", rf.me, msg.id, msg.ok)
 	if rf.CurrentTerm == term && rf.state == LEADER {
 		if !msg.reply.Success {
-			// rf.nextIndex[msg.id] = min(msg.prevIndex, rf.nextIndex[msg.id])
-			// DPrintf("[Recv Msg] rpc fail. leader %v target %v nextIndex %v", rf.me, msg.id, rf.nextIndex[msg.id])
-
 			if msg.reply.ConflictTerm != 0 {
 				conflictTermIdx := 0
 				for idx := msg.prevIndex; idx >= 1; idx-- {
@@ -802,7 +799,7 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
-		r := rand.Intn(100) + 300 // [400, 800)
+		r := rand.Intn(100) + 300 // [300, 400)
 		time.Sleep(time.Duration(r) * time.Millisecond)
 
 		rf.doElection()
