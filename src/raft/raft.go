@@ -395,7 +395,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if reply.Success {
-			oldidx := rf.commitIndex
 			if args.LeaderCommit > rf.commitIndex {
 				if len(args.Entries) != 0 {
 					rf.commitIndex = min(args.LeaderCommit, args.Entries[len(args.Entries)-1].Index)
@@ -408,18 +407,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						}
 					}
 				}
-			}
-			oldidx = max(oldidx, rf.LastIncludedIndex)
-			for i := 0; i < rf.commitIndex-oldidx; i++ {
-				msg := ApplyMsg{}
-				msg.CommandValid = true
-				msg.Command = rf.Logs[oldidx-rf.LastIncludedIndex+i].Command
-				msg.CommandIndex = rf.Logs[oldidx-rf.LastIncludedIndex+i].Index
-				msg.SnapshotValid = false
-				DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
-				rf.mu.Unlock()
-				rf.applyCh <- msg
-				rf.mu.Lock()
 			}
 		} else {
 			if len(rf.Logs)+rf.LastIncludedIndex < args.PrevLogIndex {
@@ -473,7 +460,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	msg.Snapshot = args.Data
 	msg.SnapshotIndex = args.LastIncludeIndex
 	msg.SnapshotTerm = args.LastIncludedTerm
-	rf.applyCh <- msg
+	go func() {
+		rf.applyCh <- msg
+	}()
 	rf.persist()
 }
 
@@ -608,6 +597,9 @@ func (rf *Raft) doHeartBeat(term int, target int, ch chan LeaderMsg) bool {
 	if term < rf.CurrentTerm {
 		return false
 	}
+	if rf.nextIndex[target] <= rf.LastIncludedIndex {
+		return false
+	}
 	prevlogindex := rf.nextIndex[target] - 1
 	var prevlogterm int
 	if rf.LastIncludedIndex == prevlogindex {
@@ -626,6 +618,9 @@ func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) bool {
 		return false
 	}
 	if len(rf.Logs)+rf.LastIncludedIndex == 0 {
+		return false
+	}
+	if rf.nextIndex[target] <= rf.LastIncludedIndex {
 		return false
 	}
 	var lastLogIndex int
@@ -818,18 +813,7 @@ func (rf *Raft) leaderRecvMsg(term int, msg *LeaderMsg) {
 			N := tmpMatch[len(rf.peers)-(len(rf.peers)/2)-1]
 			if rf.commitIndex < N && N > rf.LastIncludedIndex {
 				if rf.Logs[N-rf.LastIncludedIndex-1].Term == rf.CurrentTerm {
-					oldidx := max(rf.commitIndex, rf.LastIncludedIndex)
 					rf.commitIndex = N
-					for i := 0; i < rf.commitIndex-oldidx; i++ {
-						msg := ApplyMsg{}
-						msg.CommandValid = true
-						msg.Command = rf.Logs[oldidx-rf.LastIncludedIndex+i].Command
-						msg.CommandIndex = rf.Logs[oldidx-rf.LastIncludedIndex+i].Index
-						DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
-						rf.mu.Unlock()
-						rf.applyCh <- msg
-						rf.mu.Lock()
-					}
 				}
 			}
 		}
@@ -956,7 +940,7 @@ func (rf *Raft) doElection() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for !rf.killed() {
 
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
@@ -966,6 +950,33 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(r) * time.Millisecond)
 
 		rf.doElection()
+	}
+}
+
+func (rf *Raft) applyer() {
+	last_update_idx := 0
+	for !rf.killed() {
+		time.Sleep(100 * time.Millisecond)
+		rf.mu.Lock()
+		now_commit := rf.commitIndex
+		last_update_idx = max(last_update_idx, rf.LastIncludedIndex)
+		rf.mu.Unlock()
+		if now_commit > last_update_idx {
+			rf.mu.Lock()
+			for i := 0; i < now_commit-last_update_idx; i++ {
+				msg := ApplyMsg{}
+				msg.CommandValid = true
+				msg.Command = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Command
+				msg.CommandIndex = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Index
+				msg.SnapshotValid = false
+				DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
+				rf.mu.Unlock()
+				rf.applyCh <- msg
+				rf.mu.Lock()
+			}
+			last_update_idx = now_commit
+			rf.mu.Unlock()
+		}
 	}
 }
 
@@ -1005,6 +1016,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applyer()
 
 	return rf
 }
