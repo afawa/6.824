@@ -743,7 +743,7 @@ func (rf *Raft) leaderHeartBeatTrigger(term int, target int, ch chan LeaderMsg) 
 func (rf *Raft) leaderTaskLoop(term int, target int) {
 	ch := make(chan LeaderMsg)
 	for !rf.killed() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
 		}
@@ -755,7 +755,7 @@ func (rf *Raft) leaderHeartBeatLoop(term int, target int) {
 	ch := make(chan LeaderMsg)
 	go rf.leaderHeartBeat(term, target, ch)
 	for !rf.killed() {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
 		}
@@ -956,7 +956,7 @@ func (rf *Raft) ticker() {
 func (rf *Raft) applyer() {
 	last_update_idx := 0
 	for !rf.killed() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 		rf.mu.Lock()
 		now_commit := rf.commitIndex
 		last_update_idx = max(last_update_idx, rf.LastIncludedIndex)
