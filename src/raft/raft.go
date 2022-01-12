@@ -591,45 +591,13 @@ func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int,
 	ch <- msg
 }
 
-func (rf *Raft) doHeartBeat(term int, target int, ch chan LeaderMsg) bool {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if term < rf.CurrentTerm {
-		return false
-	}
-	if rf.nextIndex[target] <= rf.LastIncludedIndex {
-		return false
-	}
-	prevlogindex := rf.nextIndex[target] - 1
-	var prevlogterm int
-	if rf.LastIncludedIndex == prevlogindex {
-		prevlogterm = rf.LastIncludedTerm
-	} else {
-		prevlogterm = rf.Logs[prevlogindex-rf.LastIncludedIndex-1].Term
-	}
-	go rf.leaderTask(target, term, rf.me, prevlogindex, prevlogterm, make([]Log, 0), rf.commitIndex, ch)
-	return true
-}
-
 func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if term < rf.CurrentTerm {
 		return false
 	}
-	if len(rf.Logs)+rf.LastIncludedIndex == 0 {
-		return false
-	}
 	if rf.nextIndex[target] <= rf.LastIncludedIndex {
-		return false
-	}
-	var lastLogIndex int
-	if len(rf.Logs) == 0 {
-		lastLogIndex = rf.LastIncludedIndex
-	} else {
-		lastLogIndex = rf.Logs[len(rf.Logs)-1].Index
-	}
-	if lastLogIndex < rf.nextIndex[target] {
 		return false
 	}
 	// send start from next index
@@ -650,24 +618,6 @@ func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) bool {
 
 func (rf *Raft) leaderSend(term int, target int, ch chan LeaderMsg) {
 	if rf.doSendLog(term, target, ch) {
-		msg := <-ch
-		if !msg.ok {
-			return
-		}
-		if msg.reply.Term < term {
-			fmt.Printf("[entriy] server %v find reply term %v less than ch term %v, impossible\n", rf.me, msg.reply.Term, term)
-			return
-		}
-		if msg.reply.Term > term {
-			rf.leader2follower(&msg)
-			return
-		}
-		rf.leaderRecvMsg(term, &msg)
-	}
-}
-
-func (rf *Raft) leaderHeartBeat(term int, target int, ch chan LeaderMsg) {
-	if rf.doHeartBeat(term, target, ch) {
 		msg := <-ch
 		if !msg.ok {
 			return
@@ -730,20 +680,11 @@ func (rf *Raft) leaderTaskTrigger(term int, target int, ch chan LeaderMsg) {
 	}
 }
 
-func (rf *Raft) leaderHeartBeatTrigger(term int, target int, ch chan LeaderMsg) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.nextIndex[target] > rf.LastIncludedIndex {
-		go rf.leaderHeartBeat(term, target, ch)
-	} else {
-		go rf.leaderInstallSnapshot(term, target)
-	}
-}
-
 func (rf *Raft) leaderTaskLoop(term int, target int) {
 	ch := make(chan LeaderMsg)
+	go rf.leaderSend(term, target, ch)
 	for !rf.killed() {
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
 		}
@@ -751,17 +692,6 @@ func (rf *Raft) leaderTaskLoop(term int, target int) {
 	}
 }
 
-func (rf *Raft) leaderHeartBeatLoop(term int, target int) {
-	ch := make(chan LeaderMsg)
-	go rf.leaderHeartBeat(term, target, ch)
-	for !rf.killed() {
-		time.Sleep(250 * time.Millisecond)
-		if !rf.leaderCheck(term) {
-			break
-		}
-		go rf.leaderHeartBeatTrigger(term, target, ch)
-	}
-}
 func (rf *Raft) leaderCheck(term int) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -824,7 +754,6 @@ func (rf *Raft) leaderRecvMsg(term int, msg *LeaderMsg) {
 func (rf *Raft) leaderStart(term int) {
 	for i := range rf.peers {
 		if i != rf.me {
-			go rf.leaderHeartBeatLoop(term, i)
 			go rf.leaderTaskLoop(term, i)
 		}
 	}
@@ -956,7 +885,7 @@ func (rf *Raft) ticker() {
 func (rf *Raft) applyer() {
 	last_update_idx := 0
 	for !rf.killed() {
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
 		now_commit := rf.commitIndex
 		last_update_idx = max(last_update_idx, rf.LastIncludedIndex)
