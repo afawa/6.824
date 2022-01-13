@@ -353,6 +353,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.CurrentTerm = args.Term
 			rf.state = FOLLOWER
 			reply.Term = rf.CurrentTerm
+			rf.persist()
 			DPrintf("[AppendEntries] %v change to follower\n", rf.me)
 		} else {
 			if rf.state == LEADER {
@@ -361,6 +362,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				DPrintf("[AppendEntries] %v change from candidate to follower\n", rf.me)
 				rf.state = FOLLOWER
 				rf.VotedFor = args.LeaderId
+				rf.persist()
 			}
 		}
 		if rf.LastIncludedIndex > args.PrevLogIndex {
@@ -385,11 +387,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				idx++
 				if idx == len(rf.Logs) {
 					rf.Logs = append(rf.Logs, args.Entries[i:]...)
+					rf.persist()
 					break
 				}
 				if rf.Logs[idx].Term != args.Entries[i].Term {
 					rf.Logs = rf.Logs[:idx]
 					rf.Logs = append(rf.Logs, args.Entries[i:]...)
+					rf.persist()
 					break
 				}
 			}
@@ -424,7 +428,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 	}
-	rf.persist()
 	DPrintf("[AppendEntries] %v reply to %v term %v success %v\n", rf.me, args.LeaderId, reply.Term, reply.Success)
 	rf.mu.Unlock()
 }
@@ -445,6 +448,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		rf.CurrentTerm = args.Term
 		rf.state = FOLLOWER
 		reply.Term = rf.CurrentTerm
+		rf.persist()
 		DPrintf("[AppendEntries] %v change to follower\n", rf.me)
 	} else {
 		if rf.state == LEADER {
@@ -453,6 +457,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			DPrintf("[AppendEntries] %v change from candidate to follower\n", rf.me)
 			rf.state = FOLLOWER
 			rf.VotedFor = args.LeaderId
+			rf.persist()
 		}
 	}
 	msg := ApplyMsg{}
@@ -463,7 +468,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	go func() {
 		rf.applyCh <- msg
 	}()
-	rf.persist()
 }
 
 //
