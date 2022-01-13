@@ -11,7 +11,10 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	states []bool
+	states         []bool
+	lastTry        int
+	me             int64
+	processedIndex int
 }
 
 func nrand() int64 {
@@ -29,6 +32,9 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	for i := range ck.servers {
 		ck.states[i] = false
 	}
+	ck.lastTry = 0
+	ck.me = nrand()
+	ck.processedIndex = 0
 	return ck
 }
 
@@ -50,10 +56,17 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	reply := GetReply{}
 	args.Key = key
+	args.ClerkID = ck.me
+	ck.processedIndex += 1
+	args.OperationIndex = ck.processedIndex
 	target := ck.SendTo()
-	for true {
+	for {
 		ok := ck.servers[target].Call("KVServer.Get", &args, &reply)
 		if !ok {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
@@ -89,13 +102,21 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
+	args.ClerkID = ck.me
+	ck.processedIndex += 1
+	args.OperationIndex = ck.processedIndex
 	target := ck.SendTo()
-	for true {
+	for {
 		ok := ck.servers[target].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
+			ck.UpdateState(target)
 			return
 		} else if reply.Err == ErrWrongLeader {
 			for i := range ck.states {
@@ -121,7 +142,8 @@ func (ck *Clerk) SendTo() int {
 			return i
 		}
 	}
-	return int(nrand()) % len(ck.states)
+	ck.lastTry = (ck.lastTry + 1) % len(ck.servers)
+	return ck.lastTry
 }
 
 func (ck *Clerk) UpdateState(id int) {
