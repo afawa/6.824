@@ -1,13 +1,17 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"fmt"
+	"math/big"
 
+	"6.824/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	states []bool
 }
 
 func nrand() int64 {
@@ -21,6 +25,10 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.states = make([]bool, len(servers))
+	for i := range ck.servers {
+		ck.states[i] = false
+	}
 	return ck
 }
 
@@ -39,6 +47,28 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	args := GetArgs{}
+	reply := GetReply{}
+	args.Key = key
+	target := ck.SendTo()
+	for true {
+		ok := ck.servers[target].Call("KVServer.Get", &args, &reply)
+		if !ok {
+			continue
+		}
+		if reply.Err == OK {
+			ck.UpdateState(target)
+			return reply.Value
+		} else if reply.Err == ErrNoKey {
+			ck.UpdateState(target)
+			break
+		} else {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
+		}
+	}
 	return ""
 }
 
@@ -54,6 +84,28 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{}
+	reply := PutAppendReply{}
+	args.Key = key
+	args.Value = value
+	args.Op = op
+	target := ck.SendTo()
+	for true {
+		ok := ck.servers[target].Call("KVServer.PutAppend", &args, &reply)
+		if !ok {
+			continue
+		}
+		if reply.Err == OK {
+			return
+		} else if reply.Err == ErrWrongLeader {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
+		} else {
+			fmt.Println("[Fatal Error] Put Append RPC recv unknown ret")
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
@@ -61,4 +113,23 @@ func (ck *Clerk) Put(key string, value string) {
 }
 func (ck *Clerk) Append(key string, value string) {
 	ck.PutAppend(key, value, "Append")
+}
+
+func (ck *Clerk) SendTo() int {
+	for i := range ck.states {
+		if ck.states[i] {
+			return i
+		}
+	}
+	return int(nrand()) % len(ck.states)
+}
+
+func (ck *Clerk) UpdateState(id int) {
+	for i := range ck.states {
+		if i == id {
+			ck.states[i] = true
+		} else {
+			ck.states[i] = false
+		}
+	}
 }
