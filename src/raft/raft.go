@@ -98,6 +98,14 @@ type Log struct {
 	Index   int
 }
 
+type Job struct {
+	target     int
+	startIndex int
+	startTerm  int
+	// endIndex   int
+	// endTerm    int
+}
+
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
@@ -118,6 +126,7 @@ type Raft struct {
 	lastApplied   int
 	nextIndex     []int
 	matchIndex    []int
+	sendMap       map[Job]int
 
 	// SnapShot
 	LastIncludedIndex int
@@ -586,6 +595,17 @@ func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int,
 	args.LeaderCommit = leaderCommit
 	DPrintf("[Leader Task] leader %v send to %v. term %v, prevlogindex %v, prevlogterm %v, entrylen %v, leadercommit %v.", rf.me, target, args.Term, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries), args.LeaderCommit)
 	ok := rf.sendAppendEntries(target, &args, &reply)
+	if len(args.Entries) != 0 {
+		job := Job{}
+		job.target = target
+		job.startIndex = args.Entries[0].Index
+		job.startTerm = args.Entries[0].Term
+		// job.endIndex = args.Entries[len(args.Entries)-1].Index
+		// job.endTerm = args.Entries[len(args.Entries)-1].Term
+		rf.mu.Lock()
+		rf.sendMap[job] -= 1
+		rf.mu.Unlock()
+	}
 	msg := LeaderMsg{}
 	msg.id = target
 	msg.ok = ok
@@ -595,7 +615,7 @@ func (rf *Raft) leaderTask(target int, term int, leaderID int, prevLogIndex int,
 	ch <- msg
 }
 
-func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) bool {
+func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg, isBroadcast bool) bool {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if term < rf.CurrentTerm {
@@ -616,12 +636,34 @@ func (rf *Raft) doSendLog(term int, target int, ch chan LeaderMsg) bool {
 	for i := rf.nextIndex[target] - rf.LastIncludedIndex - 1; i < len(rf.Logs); i++ {
 		logs = append(logs, rf.Logs[i])
 	}
+	if len(logs) > 0 {
+		job := Job{}
+		job.target = target
+		job.startIndex = logs[0].Index
+		job.startTerm = logs[0].Term
+		// job.endIndex = logs[len(logs)-1].Index
+		// job.endTerm = logs[len(logs)-1].Term
+		_, ok := rf.sendMap[job]
+		if !ok {
+			rf.sendMap[job] = 0
+		} else {
+			if rf.sendMap[job] >= 3 {
+				return false
+			} else {
+				rf.sendMap[job] += 1
+			}
+		}
+	} else {
+		if !isBroadcast {
+			return false
+		}
+	}
 	go rf.leaderTask(target, term, rf.me, prevlogindex, prevlogterm, logs, rf.commitIndex, ch)
 	return true
 }
 
-func (rf *Raft) leaderSend(term int, target int, ch chan LeaderMsg) {
-	if rf.doSendLog(term, target, ch) {
+func (rf *Raft) leaderSend(term int, target int, ch chan LeaderMsg, isBroadcast bool) {
+	if rf.doSendLog(term, target, ch, isBroadcast) {
 		msg := <-ch
 		if !msg.ok {
 			return
@@ -674,11 +716,11 @@ func (rf *Raft) leaderInstallSnapshot(term int, target int) {
 	}
 }
 
-func (rf *Raft) leaderTaskTrigger(term int, target int, ch chan LeaderMsg) {
+func (rf *Raft) leaderTaskTrigger(term int, target int, ch chan LeaderMsg, isBroadcast bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.nextIndex[target] > rf.LastIncludedIndex {
-		go rf.leaderSend(term, target, ch)
+		go rf.leaderSend(term, target, ch, isBroadcast)
 	} else {
 		go rf.leaderInstallSnapshot(term, target)
 	}
@@ -686,13 +728,15 @@ func (rf *Raft) leaderTaskTrigger(term int, target int, ch chan LeaderMsg) {
 
 func (rf *Raft) leaderTaskLoop(term int, target int) {
 	ch := make(chan LeaderMsg)
-	go rf.leaderSend(term, target, ch)
+	go rf.leaderSend(term, target, ch, true)
+	i := 0
 	for !rf.killed() {
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
 		}
-		rf.leaderTaskTrigger(term, target, ch)
+		rf.leaderTaskTrigger(term, target, ch, i%10 == 0)
+		i = (i + 1) % 10
 	}
 }
 
@@ -798,6 +842,7 @@ func (rf *Raft) win(term int) {
 		DPrintf("Server %v become leader\n", rf.me)
 		rf.nextIndex = []int(nil)
 		rf.matchIndex = []int(nil)
+		rf.sendMap = make(map[Job]int)
 		for i := 0; i < len(rf.peers); i++ {
 			rf.nextIndex = append(rf.nextIndex, rf.LastIncludedIndex+len(rf.Logs)+1)
 			rf.matchIndex = append(rf.matchIndex, 0)
@@ -892,24 +937,30 @@ func (rf *Raft) applyer() {
 		time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
 		now_commit := rf.commitIndex
-		last_update_idx = max(last_update_idx, rf.LastIncludedIndex)
 		rf.mu.Unlock()
-		if now_commit > last_update_idx {
-			rf.mu.Lock()
-			for i := 0; i < now_commit-last_update_idx; i++ {
-				msg := ApplyMsg{}
-				msg.CommandValid = true
-				msg.Command = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Command
-				msg.CommandIndex = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Index
-				msg.SnapshotValid = false
-				DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
-				rf.mu.Unlock()
-				rf.applyCh <- msg
-				rf.mu.Lock()
+		i := 0
+		rf.mu.Lock()
+		for {
+			if rf.LastIncludedIndex > last_update_idx {
+				last_update_idx = rf.LastIncludedIndex
+				i = 0
 			}
-			last_update_idx = now_commit
+			if i >= now_commit-last_update_idx {
+				rf.mu.Unlock()
+				break
+			}
+			msg := ApplyMsg{}
+			msg.CommandValid = true
+			msg.Command = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Command
+			msg.CommandIndex = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Index
+			msg.SnapshotValid = false
+			DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
 			rf.mu.Unlock()
+			rf.applyCh <- msg
+			rf.mu.Lock()
+			i += 1
 		}
+		last_update_idx = now_commit
 	}
 }
 
