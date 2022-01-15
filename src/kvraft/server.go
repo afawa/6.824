@@ -5,13 +5,14 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -63,21 +64,38 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	command.ClerkID = args.ClerkID
 	command.OpIndex = args.OperationIndex
 	index, _, isLeader := kv.rf.Start(command)
+	defer func() {
+		kv.mu.Lock()
+		_, ok := kv.pendingChannel[index]
+		if ok {
+			delete(kv.pendingChannel, index)
+		}
+		kv.mu.Unlock()
+	}()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		return
 	}
+	kv.checkIndex(index)
+	kv.makePendingChannel(index)
 	// waiting for apply
-	ch := make(chan raft.ApplyMsg)
 	kv.mu.Lock()
-	kv.pendingChannel[index] = ch
+	ch, ok := kv.pendingChannel[index]
+	if !ok {
+		fmt.Printf("[Fatal Error] can't get pending msg channel for index %v\n", index)
+	}
 	kv.mu.Unlock()
 	msg := <-ch
+	if msg.CommandIndex != index {
+		fmt.Printf("[Fatal Error] get wrong index msg, expect %v recv %v\n", index, msg.CommandIndex)
+	}
 	op := msg.Command.(Op)
-	if op.Type == GET && op.ClerkID == args.ClerkID && op.OpIndex == args.OperationIndex && op.Key == args.Key {
+	if op == command {
 		kv.mu.Lock()
 		value, ok := kv.data[op.Key]
 		kv.mu.Unlock()
 		if ok {
+			DPrintf("[Server %v] Get, key %v, value %v", kv.me, op.Key, value)
 			reply.Err = OK
 			reply.Value = value
 		} else {
@@ -102,20 +120,69 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	command.Key = args.Key
 	command.ClerkID = args.ClerkID
 	command.OpIndex = args.OperationIndex
+	command.Value = args.Value
 	index, _, isLeader := kv.rf.Start(command)
+	t1 := time.Now()
+	defer func() {
+		kv.mu.Lock()
+		_, ok := kv.pendingChannel[index]
+		if ok {
+			delete(kv.pendingChannel, index)
+		}
+		kv.mu.Unlock()
+	}()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	kv.checkIndex(index)
+	kv.makePendingChannel(index)
 	kv.mu.Lock()
-	kv.pendingChannel[index] = ch
+	ch, ok := kv.pendingChannel[index]
+	if !ok {
+		fmt.Printf("[Fatal Error] can't get pending msg channel for index %v\n", index)
+	}
 	kv.mu.Unlock()
 	msg := <-ch
+	t2 := time.Now()
+	fmt.Printf("time: %v\n", t2.Sub(t1))
+	if msg.CommandIndex != index {
+		fmt.Printf("[Fatal Error] get wrong index msg, expect %v recv %v\n", index, msg.CommandIndex)
+	}
 	op := msg.Command.(Op)
-	if op.Type == command.Type && op.ClerkID == args.ClerkID && op.OpIndex == args.OperationIndex && op.Key == args.Key && op.Value == args.Value {
+	if op == command {
 		reply.Err = OK
 	} else {
 		reply.Err = ErrWrongLeader
+	}
+}
+
+func (kv *KVServer) checkIndex(index int) {
+	kv.mu.Lock()
+	ch, ok := kv.pendingChannel[index]
+	if ok {
+		fmt.Printf("[Warning] there is another one waiting on index %v\n", index)
+		msg := raft.ApplyMsg{}
+		msg.CommandIndex = index
+		msg.CommandValid = true
+		ch <- msg
+		fmt.Printf("[Warning] done\n")
+	}
+	kv.mu.Unlock()
+}
+
+func (kv *KVServer) makePendingChannel(index int) {
+	for !kv.killed() {
+		time.Sleep(10 * time.Millisecond)
+		kv.mu.Lock()
+		_, ok := kv.pendingChannel[index]
+		if !ok {
+			ch := make(chan raft.ApplyMsg)
+			kv.pendingChannel[index] = ch
+			kv.mu.Unlock()
+			break
+		}
+		kv.mu.Unlock()
 	}
 }
 
@@ -134,9 +201,10 @@ func (kv *KVServer) Receiver() {
 					defer kv.mu.Unlock()
 					opidx, ok := kv.opIndexmap[op.ClerkID]
 					if ok && opidx >= op.OpIndex {
-						DPrintf("Recv old put|append op from clerk %v, now opidx %v, this %v", op.ClerkID, opidx, op.OpIndex)
+						DPrintf("[Server %v] Recv old put|append op from clerk %v, now opidx %v, this %v", kv.me, op.ClerkID, opidx, op.OpIndex)
 						return
 					}
+					DPrintf("[Server %v], type %v, key %v, value %v, clerk %v, opidx %v", kv.me, op.Type, op.Key, op.Value, op.ClerkID, op.OpIndex)
 					if op.Type == PUT {
 						kv.data[op.Key] = op.Value
 					} else {
@@ -215,6 +283,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.Receiver()
 
 	return kv
 }

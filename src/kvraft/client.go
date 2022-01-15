@@ -61,16 +61,14 @@ func (ck *Clerk) Get(key string) string {
 	args.OperationIndex = ck.processedIndex
 	target := ck.SendTo()
 	for {
+		DPrintf("Clerk %v, op GET, key %v, opidx %v, target %v, start", ck.me, key, ck.processedIndex, target)
 		ok := ck.servers[target].Call("KVServer.Get", &args, &reply)
 		if !ok {
-			for i := range ck.states {
-				ck.states[i] = false
-			}
-			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
 			ck.UpdateState(target)
+			DPrintf("Clerk %v, opidx %v, done, value %v", ck.me, ck.processedIndex, reply.Value)
 			return reply.Value
 		} else if reply.Err == ErrNoKey {
 			ck.UpdateState(target)
@@ -82,6 +80,7 @@ func (ck *Clerk) Get(key string) string {
 			target = ck.SendTo()
 		}
 	}
+	DPrintf("Clerk %v, opidx %v, done, NoKey", ck.me, ck.processedIndex)
 	return ""
 }
 
@@ -107,16 +106,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.OperationIndex = ck.processedIndex
 	target := ck.SendTo()
 	for {
+		DPrintf("Clerk %v, op %v, key %v, value %v, opidx %v, target %v, start", ck.me, op, key, value, ck.processedIndex, target)
 		ok := ck.servers[target].Call("KVServer.PutAppend", &args, &reply)
 		if !ok {
-			for i := range ck.states {
-				ck.states[i] = false
-			}
-			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
 			ck.UpdateState(target)
+			DPrintf("Clerk %v, opidx %v, done", ck.me, ck.processedIndex)
 			return
 		} else if reply.Err == ErrWrongLeader {
 			for i := range ck.states {
