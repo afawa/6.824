@@ -64,6 +64,10 @@ func (ck *Clerk) Get(key string) string {
 		DPrintf("Clerk %v, op GET, key %v, opidx %v, target %v, start", ck.me, key, ck.processedIndex, target)
 		ok := ck.servers[target].Call("KVServer.Get", &args, &reply)
 		if !ok {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
@@ -108,7 +112,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		DPrintf("Clerk %v, op %v, key %v, value %v, opidx %v, target %v, start", ck.me, op, key, value, ck.processedIndex, target)
 		ok := ck.servers[target].Call("KVServer.PutAppend", &args, &reply)
+		DPrintf("done Clerk %v, op %v, ok %v, reply %v", ck.me, ck.processedIndex, ok, reply.Err)
 		if !ok {
+			for i := range ck.states {
+				ck.states[i] = false
+			}
+			target = ck.SendTo()
 			continue
 		}
 		if reply.Err == OK {
