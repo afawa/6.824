@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
@@ -23,9 +24,10 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type OpType string
 
 const (
-	GET    OpType = "Get"
-	PUT    OpType = "Put"
-	APPEND OpType = "Append"
+	GET     OpType = "Get"
+	PUT     OpType = "Put"
+	APPEND  OpType = "Append"
+	INVAILD OpType = "Invaild"
 )
 
 type Op struct {
@@ -51,8 +53,31 @@ type KVServer struct {
 	// Your definitions here.
 	data           map[string]string
 	lastApplyIndex int
+	lastTerm       int
 	opIndexmap     map[int64]int
 	pendingChannel map[int][]chan raft.ApplyMsg
+}
+
+func (kv *KVServer) termChecker() {
+	for !kv.killed() {
+		time.Sleep(10 * time.Millisecond)
+		term, _ := kv.rf.GetState()
+		kv.mu.Lock()
+		if term > kv.lastTerm {
+			msg := raft.ApplyMsg{}
+			var op Op
+			op.Type = INVAILD
+			msg.Command = op
+			for _, v := range kv.pendingChannel {
+				for i := range v {
+					v[i] <- msg
+				}
+			}
+			kv.lastTerm = term
+			kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+		}
+		kv.mu.Unlock()
+	}
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -73,14 +98,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	ch := make(chan raft.ApplyMsg)
 	kv.pendingChannel[index] = append(kv.pendingChannel[index], ch)
-	chidx := len(kv.pendingChannel[index]) - 1
-	defer kv.remove_ch(index, chidx)
 	kv.mu.Unlock()
 
 	msg := <-ch
-	if msg.CommandIndex != index {
-		fmt.Printf("[Fatal Error] Clerk %v get wrong index msg, expect %v recv %v\n", args.ClerkID, index, msg.CommandIndex)
-	}
 	op := msg.Command.(Op)
 	if op == command {
 		kv.mu.Lock()
@@ -94,7 +114,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Err = ErrNoKey
 		}
 	} else {
-		DPrintf("[Attention] expect op:{Type %v, Clerk %v, Key %v, Value %v, Opidx %v}", op.Type, op.ClerkID, op.Key, op.Value, op.OpIndex)
+		DPrintf("[Server %v] recv op: %v, expect op: %v", kv.me, op, command)
 		reply.Err = ErrWrongLeader
 	}
 }
@@ -124,27 +144,16 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 	ch := make(chan raft.ApplyMsg)
 	kv.pendingChannel[index] = append(kv.pendingChannel[index], ch)
-	chidx := len(kv.pendingChannel[index]) - 1
-	defer kv.remove_ch(index, chidx)
 	kv.mu.Unlock()
 
 	msg := <-ch
-	if msg.CommandIndex != index {
-		fmt.Printf("[Fatal Error] get wrong index msg, expect %v recv %v\n", index, msg.CommandIndex)
-	}
 	op := msg.Command.(Op)
 	if op == command {
 		reply.Err = OK
 	} else {
-		DPrintf("[Attention] expect op:{Type %v, Clerk %v, Key %v, Value %v, Opidx %v}", op.Type, op.ClerkID, op.Key, op.Value, op.OpIndex)
+		DPrintf("[Server %v] recv op: %v, expect op: %v", kv.me, op, command)
 		reply.Err = ErrWrongLeader
 	}
-}
-
-func (kv *KVServer) remove_ch(index int, chidx int) {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-	kv.pendingChannel[index] = append(kv.pendingChannel[index][:chidx], kv.pendingChannel[index][chidx+1:]...)
 }
 
 func (kv *KVServer) Receiver() {
@@ -189,6 +198,7 @@ func (kv *KVServer) Receiver() {
 					DPrintf("[Server %v] upload recv, opidx: %v", kv.me, op.OpIndex)
 					ch_list[i] <- msg
 				}
+				delete(kv.pendingChannel, msg.CommandIndex)
 			} else {
 				DPrintf("[Server %v] out recv, opidx: %v", kv.me, op.OpIndex)
 			}
@@ -246,12 +256,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastApplyIndex = 0
 	kv.opIndexmap = make(map[int64]int)
 	kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+	kv.lastTerm = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	go kv.Receiver()
+	go kv.termChecker()
 
 	return kv
 }
