@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"sync"
@@ -41,6 +42,13 @@ type Op struct {
 	OpIndex int
 }
 
+type SnapShot struct {
+	LastIndex int
+	LastTerm  int
+	Data      map[string]string
+	OpIndex   map[int64]int
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -51,11 +59,46 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	data           map[string]string
-	lastApplyIndex int
-	lastTerm       int
-	opIndexmap     map[int64]int
+	Data           map[string]string
+	LastApplyIndex int
+	LastTerm       int
+	OpIndexmap     map[int64]int
 	pendingChannel map[int][]chan raft.ApplyMsg
+	lastSnapshot   SnapShot
+}
+
+func (kv *KVServer) decodeSnapshot(data []byte) SnapShot {
+	var snapshot SnapShot
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var LastIndex int
+	var LastTerm int
+	var Data map[string]string
+	var OpIndex map[int64]int
+	if d.Decode(&LastIndex) != nil || d.Decode(&LastTerm) != nil || d.Decode(&Data) != nil || d.Decode(&OpIndex) != nil {
+		fmt.Print("[Read Snapshot] error in decode\n")
+	} else {
+		snapshot.LastIndex = LastIndex
+		snapshot.LastTerm = LastTerm
+		snapshot.Data = Data
+		snapshot.OpIndex = OpIndex
+	}
+	return snapshot
+}
+
+func (kv *KVServer) readSnapshot() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	snapshot := kv.rf.GetSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	ret := kv.decodeSnapshot(snapshot)
+	kv.LastApplyIndex = ret.LastIndex
+	kv.LastTerm = ret.LastTerm
+	kv.Data = ret.Data
+	kv.OpIndexmap = ret.OpIndex
+	DPrintf("[Read Snapshot] Server %v Snapshot %v", kv.me, ret)
 }
 
 func (kv *KVServer) termChecker() {
@@ -63,7 +106,7 @@ func (kv *KVServer) termChecker() {
 		time.Sleep(10 * time.Millisecond)
 		term, _ := kv.rf.GetState()
 		kv.mu.Lock()
-		if term > kv.lastTerm {
+		if term > kv.LastTerm {
 			msg := raft.ApplyMsg{}
 			var op Op
 			op.Type = INVAILD
@@ -73,7 +116,7 @@ func (kv *KVServer) termChecker() {
 					v[i] <- msg
 				}
 			}
-			kv.lastTerm = term
+			kv.LastTerm = term
 			kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
 		}
 		kv.mu.Unlock()
@@ -104,7 +147,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op := msg.Command.(Op)
 	if op == command {
 		kv.mu.Lock()
-		value, ok := kv.data[op.Key]
+		value, ok := kv.Data[op.Key]
 		kv.mu.Unlock()
 		if ok {
 			DPrintf("[Server %v] Get, key %v, value %v", kv.me, op.Key, value)
@@ -162,36 +205,36 @@ func (kv *KVServer) Receiver() {
 		msg := <-kv.applyCh
 		// kv.mu.Unlock()
 		if msg.CommandValid {
-			if msg.CommandIndex-1 != kv.lastApplyIndex {
-				fmt.Println("[Fatal Error] raft apply msg out of order")
-				continue
-			}
+			// if msg.CommandIndex-1 != kv.LastApplyIndex {
+			// 	fmt.Printf("[Fatal Error] raft apply msg out of order, last index %v, this index %v\n", kv.LastApplyIndex, msg.CommandIndex)
+			// }
 			op := msg.Command.(Op)
 			DPrintf("[Server %v] Recv, type %v, key %v, value %v, clerk %v, opidx %v", kv.me, op.Type, op.Key, op.Value, op.ClerkID, op.OpIndex)
 			if op.Type == PUT || op.Type == APPEND {
 				func() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
-					opidx, ok := kv.opIndexmap[op.ClerkID]
+					opidx, ok := kv.OpIndexmap[op.ClerkID]
 					if ok && opidx >= op.OpIndex {
-						DPrintf("[Server %v] Recv old put|append op from clerk %v, now opidx %v, this %v", kv.me, op.ClerkID, opidx, op.OpIndex)
+						DPrintf("[Server %v] Recv old put|append op from clerk %v, this %v, op %v", kv.me, op.ClerkID, opidx, op)
 						return
 					}
 					if op.Type == PUT {
-						kv.data[op.Key] = op.Value
+						kv.Data[op.Key] = op.Value
 					} else {
-						value, ok := kv.data[op.Key]
+						value, ok := kv.Data[op.Key]
 						if !ok {
-							kv.data[op.Key] = op.Value
+							kv.Data[op.Key] = op.Value
 						} else {
-							kv.data[op.Key] = value + op.Value
+							kv.Data[op.Key] = value + op.Value
 						}
 					}
-					kv.opIndexmap[op.ClerkID] = op.OpIndex
+					DPrintf("[Server %v] Data %v", kv.me, kv.Data)
+					kv.OpIndexmap[op.ClerkID] = op.OpIndex
 				}()
 			}
 			kv.mu.Lock()
-			kv.lastApplyIndex = msg.CommandIndex
+			kv.LastApplyIndex = msg.CommandIndex
 			ch_list, ok := kv.pendingChannel[msg.CommandIndex]
 			if ok {
 				for i := range ch_list {
@@ -201,6 +244,40 @@ func (kv *KVServer) Receiver() {
 				delete(kv.pendingChannel, msg.CommandIndex)
 			} else {
 				DPrintf("[Server %v] out recv, opidx: %v", kv.me, op.OpIndex)
+			}
+			if kv.maxraftstate != -1 {
+				nowsize := kv.rf.GetStateSize()
+				if kv.maxraftstate-nowsize <= 100 {
+					snapshot := SnapShot{}
+					snapshot.LastIndex = kv.LastApplyIndex
+					snapshot.LastTerm = kv.LastTerm
+					snapshot.Data = kv.Data
+					snapshot.OpIndex = kv.OpIndexmap
+					kv.lastSnapshot = snapshot
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					e.Encode(kv.LastApplyIndex)
+					e.Encode(kv.LastTerm)
+					e.Encode(kv.Data)
+					e.Encode(kv.OpIndexmap)
+					data := w.Bytes()
+					kv.rf.Snapshot(kv.LastApplyIndex, data)
+					DPrintf("[Server %v] make snapshot %v", kv.me, kv.lastSnapshot)
+				}
+			}
+			kv.mu.Unlock()
+		} else if msg.SnapshotValid {
+			kv.mu.Lock()
+			snapshot := kv.decodeSnapshot(msg.Snapshot)
+			DPrintf("[Server %v] Install Snapshot %v", kv.me, snapshot)
+			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+				if kv.LastApplyIndex < snapshot.LastIndex {
+					kv.LastApplyIndex = snapshot.LastIndex
+					kv.LastTerm = snapshot.LastTerm
+					kv.Data = snapshot.Data
+					kv.OpIndexmap = snapshot.OpIndex
+				}
+				kv.lastSnapshot = snapshot
 			}
 			kv.mu.Unlock()
 		}
@@ -252,16 +329,17 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-	kv.data = make(map[string]string)
-	kv.lastApplyIndex = 0
-	kv.opIndexmap = make(map[int64]int)
+	kv.Data = make(map[string]string)
+	kv.LastApplyIndex = 0
+	kv.OpIndexmap = make(map[int64]int)
 	kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
-	kv.lastTerm = 0
+	kv.LastTerm = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.readSnapshot()
 	go kv.Receiver()
 	go kv.termChecker()
 

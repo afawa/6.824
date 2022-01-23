@@ -134,6 +134,18 @@ type Raft struct {
 	CurrentSnapShot   []byte
 }
 
+func (rf *Raft) GetStateSize() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetSnapshot() []byte {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.persister.ReadSnapshot()
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -204,7 +216,6 @@ func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
 	// Your code here (2D).
-	DPrintf("[CondInstall] server %v lastIncludedIndex %v lastIncludedTerm %v", rf.me, lastIncludedIndex, lastIncludedTerm)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.LastIncludedIndex >= lastIncludedIndex {
@@ -215,10 +226,11 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if len(rf.Logs)+rf.LastIncludedIndex <= lastIncludedIndex {
 		rf.Logs = []Log(nil)
 	} else {
-		rf.Logs = rf.Logs[lastIncludedIndex-rf.LastIncludedIndex-1:]
+		rf.Logs = rf.Logs[lastIncludedIndex-rf.LastIncludedIndex:]
 	}
 	rf.LastIncludedIndex = lastIncludedIndex
 	rf.LastIncludedTerm = lastIncludedTerm
+	DPrintf("[CondInstall] server %v lastIncludedIndex %v lastIncludedTerm %v", rf.me, lastIncludedIndex, lastIncludedTerm)
 
 	rf.persist()
 
@@ -352,6 +364,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	DPrintf("[AppendEntries] %v receive from %v term %v previndex %v len %v\n", rf.me, args.LeaderId, args.Term, args.PrevLogIndex, len(args.Entries))
 	reply.Term = rf.CurrentTerm
 	if args.Term < rf.CurrentTerm {
@@ -375,7 +388,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 		if rf.LastIncludedIndex > args.PrevLogIndex {
-			fmt.Printf("[Fatal Error] log{Index %v Term %v} send by leader %v but is commited in follower %v\n", args.Entries[0].Index, args.Entries[0].Term, args.LeaderId, rf.me)
+			// early rpc
+			reply.Success = false
+			return
 		}
 		// success
 		if args.PrevLogIndex == rf.LastIncludedIndex { // Term must be the same
@@ -438,7 +453,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 	DPrintf("[AppendEntries] %v reply to %v term %v success %v\n", rf.me, args.LeaderId, reply.Term, reply.Success)
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -761,8 +775,12 @@ func (rf *Raft) leader2follower(msg *LeaderMsg) {
 
 func (rf *Raft) leaderRecvMsg(term int, msg *LeaderMsg) {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	DPrintf("[Recv Msg] server %v receive msg from %v ok %v", rf.me, msg.id, msg.ok)
 	if rf.CurrentTerm == term && rf.state == LEADER {
+		if msg.prevIndex < rf.LastIncludedIndex && !msg.reply.Success {
+			return
+		}
 		if !msg.reply.Success {
 			if msg.reply.ConflictTerm != 0 {
 				conflictTermIdx := 0
@@ -796,7 +814,6 @@ func (rf *Raft) leaderRecvMsg(term int, msg *LeaderMsg) {
 			}
 		}
 	}
-	rf.mu.Unlock()
 }
 
 func (rf *Raft) leaderStart(term int) {
@@ -954,7 +971,6 @@ func (rf *Raft) applyer() {
 			msg.Command = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Command
 			msg.CommandIndex = rf.Logs[last_update_idx-rf.LastIncludedIndex+i].Index
 			msg.SnapshotValid = false
-			DPrintf("[Apply] server %v apply msg. index %v, command %v", rf.me, msg.CommandIndex, msg.Command)
 			rf.mu.Unlock()
 			rf.applyCh <- msg
 			rf.mu.Lock()
