@@ -745,7 +745,7 @@ func (rf *Raft) leaderTaskLoop(term int, target int) {
 	go rf.leaderSend(term, target, ch, true)
 	i := 0
 	for !rf.killed() {
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 		if !rf.leaderCheck(term) {
 			break
 		}

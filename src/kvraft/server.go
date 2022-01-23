@@ -277,6 +277,18 @@ func (kv *KVServer) Receiver() {
 					kv.Data = snapshot.Data
 					kv.OpIndexmap = snapshot.OpIndex
 				}
+				msg := raft.ApplyMsg{}
+				var op Op
+				op.Type = INVAILD
+				msg.Command = op
+				for idx, v := range kv.pendingChannel {
+					if idx <= msg.SnapshotIndex {
+						for i := range v {
+							v[i] <- msg
+						}
+					}
+					delete(kv.pendingChannel, idx)
+				}
 				kv.lastSnapshot = snapshot
 			}
 			kv.mu.Unlock()
