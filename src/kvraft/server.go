@@ -277,14 +277,14 @@ func (kv *KVServer) Receiver() {
 					kv.Data = snapshot.Data
 					kv.OpIndexmap = snapshot.OpIndex
 				}
-				msg := raft.ApplyMsg{}
+				msg1 := raft.ApplyMsg{}
 				var op Op
 				op.Type = INVAILD
-				msg.Command = op
+				msg1.Command = op
 				for idx, v := range kv.pendingChannel {
 					if idx <= msg.SnapshotIndex {
 						for i := range v {
-							v[i] <- msg
+							v[i] <- msg1
 						}
 					}
 					delete(kv.pendingChannel, idx)
