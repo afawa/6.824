@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"time"
 
 	"6.824/labrpc"
 )
@@ -83,6 +84,7 @@ func (ck *Clerk) Get(key string) string {
 			}
 			target = ck.SendTo()
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	DPrintf("Clerk %v, opidx %v, done, NoKey", ck.me, ck.processedIndex)
 	return ""
@@ -132,6 +134,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		} else {
 			fmt.Println("[Fatal Error] Put Append RPC recv unknown ret")
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
