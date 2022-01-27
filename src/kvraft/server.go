@@ -199,11 +199,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-func (kv *KVServer) Receiver() {
+func (kv *KVServer) receiver() {
 	for !kv.killed() {
-		// kv.mu.Lock()
 		msg := <-kv.applyCh
-		// kv.mu.Unlock()
 		if msg.CommandValid {
 			// if msg.CommandIndex-1 != kv.LastApplyIndex {
 			// 	fmt.Printf("[Fatal Error] raft apply msg out of order, last index %v, this index %v\n", kv.LastApplyIndex, msg.CommandIndex)
@@ -352,7 +350,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.readSnapshot()
-	go kv.Receiver()
+	go kv.receiver()
 	go kv.termChecker()
 
 	return kv
