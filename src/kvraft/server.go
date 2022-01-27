@@ -28,7 +28,7 @@ const (
 	GET     OpType = "Get"
 	PUT     OpType = "Put"
 	APPEND  OpType = "Append"
-	INVAILD OpType = "Invaild"
+	INVALID OpType = "Invalid"
 )
 
 type Op struct {
@@ -109,7 +109,7 @@ func (kv *KVServer) termChecker() {
 		if term > kv.LastTerm {
 			msg := raft.ApplyMsg{}
 			var op Op
-			op.Type = INVAILD
+			op.Type = INVALID
 			msg.Command = op
 			for _, v := range kv.pendingChannel {
 				for i := range v {
@@ -279,7 +279,7 @@ func (kv *KVServer) Receiver() {
 				}
 				msg1 := raft.ApplyMsg{}
 				var op Op
-				op.Type = INVAILD
+				op.Type = INVALID
 				msg1.Command = op
 				for idx, v := range kv.pendingChannel {
 					if idx <= msg.SnapshotIndex {
