@@ -99,7 +99,7 @@ type ShardCtrler struct {
 	LastApplyIndex int
 	LastTerm       int
 	OpIndexmap     map[int64]int
-	pendingChannel map[int][]chan raft.ApplyMsg
+	pendingChannel map[int][]chan PendingListen
 
 	configs []Config // indexed by config num
 }
@@ -120,6 +120,12 @@ type Op struct {
 	Args interface{}
 }
 
+type PendingListen struct {
+	err Err
+	ret interface{}
+	msg raft.ApplyMsg
+}
+
 func (sc *ShardCtrler) termChecker() {
 	for !sc.killed() {
 		time.Sleep(10 * time.Millisecond)
@@ -130,13 +136,17 @@ func (sc *ShardCtrler) termChecker() {
 			var op Op
 			op.Type = INVALID
 			msg.Command = op
+			pend := PendingListen{}
+			pend.msg = msg
+			pend.ret = ""
+			pend.err = OK
 			for _, v := range sc.pendingChannel {
 				for i := range v {
-					v[i] <- msg
+					v[i] <- pend
 				}
 			}
 			sc.LastTerm = term
-			sc.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+			sc.pendingChannel = make(map[int][]chan PendingListen)
 		}
 		sc.mu.Unlock()
 	}
@@ -159,10 +169,13 @@ func (sc *ShardCtrler) receiver() {
 			if msg.CommandIndex-1 != sc.LastApplyIndex {
 				fmt.Printf("[Fatal Error] raft apply msg out of order, last index %v, this index %v\n", sc.LastApplyIndex, msg.CommandIndex)
 			}
+			ret_msg := PendingListen{}
+			ret_msg.msg = msg
 			if op.Type == JOIN {
 				func() {
 					sc.mu.Lock()
 					defer sc.mu.Unlock()
+					ret_msg.err = OK
 					args := op.Args.(JoinArgs)
 					opidx, ok := sc.OpIndexmap[args.ClerkID]
 					if ok && opidx >= args.OperationIndex {
@@ -229,6 +242,7 @@ func (sc *ShardCtrler) receiver() {
 				func() {
 					sc.mu.Lock()
 					defer sc.mu.Unlock()
+					ret_msg.err = OK
 					args := op.Args.(LeaveArgs)
 					opidx, ok := sc.OpIndexmap[args.ClerkID]
 					if ok && opidx >= args.OperationIndex {
@@ -282,6 +296,7 @@ func (sc *ShardCtrler) receiver() {
 				func() {
 					sc.mu.Lock()
 					defer sc.mu.Unlock()
+					ret_msg.err = OK
 					args := op.Args.(MoveArgs)
 					opidx, ok := sc.OpIndexmap[args.ClerkID]
 					if ok && opidx >= args.OperationIndex {
@@ -300,13 +315,25 @@ func (sc *ShardCtrler) receiver() {
 					sc.configs = append(sc.configs, config)
 					sc.OpIndexmap[args.ClerkID] = args.OperationIndex
 				}()
+			} else if op.Type == QUERY {
+				func() {
+					sc.mu.Lock()
+					defer sc.mu.Unlock()
+					args := op.Args.(QueryArgs)
+					ret_msg.err = OK
+					if args.Num == -1 || args.Num >= len(sc.configs) {
+						ret_msg.ret = sc.configs[len(sc.configs)-1]
+					} else {
+						ret_msg.ret = sc.configs[args.Num]
+					}
+				}()
 			}
 			sc.mu.Lock()
 			sc.LastApplyIndex = msg.CommandIndex
 			ch_list, ok := sc.pendingChannel[msg.CommandIndex]
 			if ok {
 				for i := range ch_list {
-					ch_list[i] <- msg
+					ch_list[i] <- ret_msg
 				}
 				delete(sc.pendingChannel, msg.CommandIndex)
 			}
@@ -329,12 +356,12 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		sc.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	sc.pendingChannel[index] = append(sc.pendingChannel[index], ch)
 	sc.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	reply.Err = OK
 	if reflect.DeepEqual(command, op) {
 		reply.WrongLeader = false
@@ -357,12 +384,12 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 		sc.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	sc.pendingChannel[index] = append(sc.pendingChannel[index], ch)
 	sc.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	reply.Err = OK
 	if reflect.DeepEqual(op, command) {
 		reply.WrongLeader = false
@@ -385,12 +412,12 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 		sc.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	sc.pendingChannel[index] = append(sc.pendingChannel[index], ch)
 	sc.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	reply.Err = OK
 	if reflect.DeepEqual(op, command) {
 		reply.WrongLeader = false
@@ -413,23 +440,16 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		sc.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	sc.pendingChannel[index] = append(sc.pendingChannel[index], ch)
 	sc.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	reply.Err = OK
 	if reflect.DeepEqual(op, command) {
 		reply.WrongLeader = false
-		// process query
-		sc.mu.Lock()
-		if args.Num == -1 || args.Num >= len(sc.configs) {
-			reply.Config = sc.configs[len(sc.configs)-1]
-		} else {
-			reply.Config = sc.configs[args.Num]
-		}
-		sc.mu.Unlock()
+		reply.Config = msg.ret.(Config)
 	} else {
 		reply.WrongLeader = true
 	}
@@ -481,7 +501,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 	sc.LastApplyIndex = 0
 	sc.OpIndexmap = make(map[int64]int)
-	sc.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+	sc.pendingChannel = make(map[int][]chan PendingListen)
 	sc.LastTerm = 0
 
 	go sc.receiver()
