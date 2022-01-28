@@ -49,6 +49,12 @@ type SnapShot struct {
 	OpIndex   map[int64]int
 }
 
+type PendingListen struct {
+	err Err
+	ret string
+	msg raft.ApplyMsg
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -63,7 +69,7 @@ type KVServer struct {
 	LastApplyIndex int
 	LastTerm       int
 	OpIndexmap     map[int64]int
-	pendingChannel map[int][]chan raft.ApplyMsg
+	pendingChannel map[int][]chan PendingListen
 	lastSnapshot   SnapShot
 }
 
@@ -111,13 +117,17 @@ func (kv *KVServer) termChecker() {
 			var op Op
 			op.Type = INVALID
 			msg.Command = op
+			pend := PendingListen{}
+			pend.msg = msg
+			pend.ret = ""
+			pend.err = OK
 			for _, v := range kv.pendingChannel {
 				for i := range v {
-					v[i] <- msg
+					v[i] <- pend
 				}
 			}
 			kv.LastTerm = term
-			kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+			kv.pendingChannel = make(map[int][]chan PendingListen)
 		}
 		kv.mu.Unlock()
 	}
@@ -139,23 +149,15 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	kv.pendingChannel[index] = append(kv.pendingChannel[index], ch)
 	kv.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	if op == command {
-		kv.mu.Lock()
-		value, ok := kv.Data[op.Key]
-		kv.mu.Unlock()
-		if ok {
-			DPrintf("[Server %v] Get, key %v, value %v", kv.me, op.Key, value)
-			reply.Err = OK
-			reply.Value = value
-		} else {
-			reply.Err = ErrNoKey
-		}
+		reply.Err = msg.err
+		reply.Value = msg.ret
 	} else {
 		DPrintf("[Server %v] recv op: %v, expect op: %v", kv.me, op, command)
 		reply.Err = ErrWrongLeader
@@ -185,12 +187,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	ch := make(chan raft.ApplyMsg)
+	ch := make(chan PendingListen)
 	kv.pendingChannel[index] = append(kv.pendingChannel[index], ch)
 	kv.mu.Unlock()
 
 	msg := <-ch
-	op := msg.Command.(Op)
+	op := msg.msg.Command.(Op)
 	if op == command {
 		reply.Err = OK
 	} else {
@@ -208,10 +210,14 @@ func (kv *KVServer) receiver() {
 			// }
 			op := msg.Command.(Op)
 			DPrintf("[Server %v] Recv, type %v, key %v, value %v, clerk %v, opidx %v", kv.me, op.Type, op.Key, op.Value, op.ClerkID, op.OpIndex)
+			ret_msg := PendingListen{}
+			ret_msg.msg = msg
 			if op.Type == PUT || op.Type == APPEND {
 				func() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
+					ret_msg.err = OK
+					ret_msg.ret = ""
 					opidx, ok := kv.OpIndexmap[op.ClerkID]
 					if ok && opidx >= op.OpIndex {
 						DPrintf("[Server %v] Recv old put|append op from clerk %v, this %v, op %v", kv.me, op.ClerkID, opidx, op)
@@ -230,6 +236,19 @@ func (kv *KVServer) receiver() {
 					DPrintf("[Server %v] Data %v", kv.me, kv.Data)
 					kv.OpIndexmap[op.ClerkID] = op.OpIndex
 				}()
+			} else if op.Type == GET {
+				func() {
+					kv.mu.Lock()
+					value, ok := kv.Data[op.Key]
+					kv.mu.Unlock()
+					if ok {
+						DPrintf("[Server %v] Get, key %v, value %v", kv.me, op.Key, value)
+						ret_msg.err = OK
+						ret_msg.ret = value
+					} else {
+						ret_msg.err = ErrNoKey
+					}
+				}()
 			}
 			kv.mu.Lock()
 			kv.LastApplyIndex = msg.CommandIndex
@@ -237,7 +256,7 @@ func (kv *KVServer) receiver() {
 			if ok {
 				for i := range ch_list {
 					DPrintf("[Server %v] upload recv, opidx: %v", kv.me, op.OpIndex)
-					ch_list[i] <- msg
+					ch_list[i] <- ret_msg
 				}
 				delete(kv.pendingChannel, msg.CommandIndex)
 			} else {
@@ -275,14 +294,16 @@ func (kv *KVServer) receiver() {
 					kv.Data = snapshot.Data
 					kv.OpIndexmap = snapshot.OpIndex
 				}
+				ret_msg := PendingListen{}
 				msg1 := raft.ApplyMsg{}
 				var op Op
 				op.Type = INVALID
 				msg1.Command = op
+				ret_msg.msg = msg1
 				for idx, v := range kv.pendingChannel {
 					if idx <= msg.SnapshotIndex {
 						for i := range v {
-							v[i] <- msg1
+							v[i] <- ret_msg
 						}
 					}
 					delete(kv.pendingChannel, idx)
@@ -342,7 +363,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.Data = make(map[string]string)
 	kv.LastApplyIndex = 0
 	kv.OpIndexmap = make(map[int64]int)
-	kv.pendingChannel = make(map[int][]chan raft.ApplyMsg)
+	kv.pendingChannel = make(map[int][]chan PendingListen)
 	kv.LastTerm = 0
 
 	kv.applyCh = make(chan raft.ApplyMsg)
