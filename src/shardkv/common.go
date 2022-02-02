@@ -27,6 +27,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClerkID        int64
+	OperationIndex int
 }
 
 type PutAppendReply struct {
@@ -36,9 +38,23 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClerkID        int64
+	OperationIndex int
 }
 
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type ShardMigrationArgs struct {
+	ShardID        int
+	ShardData      map[string]string
+	From           int
+	To             int
+	OperationIndex int
+}
+
+type ShardMigrationReply struct {
+	Err Err
 }
