@@ -70,7 +70,6 @@ type KVServer struct {
 	LastTerm       int
 	OpIndexmap     map[int64]int
 	pendingChannel map[int][]chan PendingListen
-	lastSnapshot   SnapShot
 }
 
 func (kv *KVServer) decodeSnapshot(data []byte) SnapShot {
@@ -265,12 +264,6 @@ func (kv *KVServer) receiver() {
 			if kv.maxraftstate != -1 {
 				nowsize := kv.rf.GetStateSize()
 				if kv.maxraftstate-nowsize <= 100 {
-					snapshot := SnapShot{}
-					snapshot.LastIndex = kv.LastApplyIndex
-					snapshot.LastTerm = kv.LastTerm
-					snapshot.Data = kv.Data
-					snapshot.OpIndex = kv.OpIndexmap
-					kv.lastSnapshot = snapshot
 					w := new(bytes.Buffer)
 					e := labgob.NewEncoder(w)
 					e.Encode(kv.LastApplyIndex)
@@ -279,7 +272,6 @@ func (kv *KVServer) receiver() {
 					e.Encode(kv.OpIndexmap)
 					data := w.Bytes()
 					kv.rf.Snapshot(kv.LastApplyIndex, data)
-					DPrintf("[Server %v] make snapshot %v", kv.me, kv.lastSnapshot)
 				}
 			}
 			kv.mu.Unlock()
@@ -308,7 +300,6 @@ func (kv *KVServer) receiver() {
 					}
 					delete(kv.pendingChannel, idx)
 				}
-				kv.lastSnapshot = snapshot
 			}
 			kv.mu.Unlock()
 		}
