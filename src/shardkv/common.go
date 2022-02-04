@@ -48,11 +48,12 @@ type GetReply struct {
 }
 
 type ShardMigrationArgs struct {
-	ShardID        int
-	ShardData      map[string]string
-	From           int
-	To             int
-	OperationIndex int
+	ShardID   int
+	ConfigID  int
+	ShardData map[string]string
+	OpIdxMap  map[int64]int
+	From      int
+	To        int
 }
 
 type ShardMigrationReply struct {
