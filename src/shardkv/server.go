@@ -70,6 +70,7 @@ type SnapShot struct {
 	ShardJobs       map[int][]raft.ApplyMsg
 	LastConfig      shardctrler.Config
 	ShardMigrations map[int]map[int]MigrationData
+	ShardConfigNum  map[int]int
 	// ShardMoveIdx int
 	// ShardIndexmap   map[int]int // gid -> index
 }
@@ -102,6 +103,7 @@ type ShardKV struct {
 	ShardJobs       map[int][]raft.ApplyMsg
 	LastConfig      shardctrler.Config
 	ShardMigrations map[int]map[int]MigrationData // ShardID -> ConfigNum -> Data
+	ShardConfigNum  map[int]int
 }
 
 func (kv *ShardKV) configReader() {
@@ -148,13 +150,15 @@ func (kv *ShardKV) decodeSnapshot(data []byte) SnapShot {
 	var ShardJobs map[int][]raft.ApplyMsg
 	var LastConfig shardctrler.Config
 	var ShardMigrations map[int]map[int]MigrationData
+	var ShardConfigNum map[int]int
 	if d.Decode(&LastApplyIndex) != nil ||
 		d.Decode(&LastTerm) != nil ||
 		d.Decode(&ShardData) != nil ||
 		d.Decode(&OpIndex) != nil ||
 		d.Decode(&ShardJobs) != nil ||
 		d.Decode(&LastConfig) != nil ||
-		d.Decode(&ShardMigrations) != nil {
+		d.Decode(&ShardMigrations) != nil ||
+		d.Decode(&ShardConfigNum) != nil {
 		fmt.Print("[Read Snapshot] error in decode\n")
 	} else {
 		snapshot.LastApplyIndex = LastApplyIndex
@@ -164,6 +168,7 @@ func (kv *ShardKV) decodeSnapshot(data []byte) SnapShot {
 		snapshot.ShardJobs = ShardJobs
 		snapshot.LastConfig = LastConfig
 		snapshot.ShardMigrations = ShardMigrations
+		snapshot.ShardConfigNum = ShardConfigNum
 	}
 	return snapshot
 }
@@ -183,6 +188,7 @@ func (kv *ShardKV) readSnapshot() {
 	kv.ShardJobs = ret.ShardJobs
 	kv.LastConfig = ret.LastConfig
 	kv.ShardMigrations = ret.ShardMigrations
+	kv.ShardConfigNum = ret.ShardConfigNum
 	DPrintf("[Read Snapshot] Group %v Server %v Snapshot %v", kv.gid, kv.me, ret)
 }
 
@@ -295,6 +301,12 @@ func (kv *ShardKV) ShardMigration(args *ShardMigrationArgs, reply *ShardMigratio
 	DPrintf("[Group %v Server %v Migration] ShardID %v, From %v, To %v, data %v", kv.gid, kv.me, command.ShardID, command.From, command.To, command.Shard)
 
 	kv.mu.Lock()
+	if kv.ShardConfigNum[args.ShardID] >= command.ConfigNum {
+		// fmt.Println("recv early rpc")
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
 	index, _, isLeader := kv.rf.Start(command)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
@@ -419,11 +431,13 @@ func (kv *ShardKV) shardWorker(shardID int) {
 					for k, v := range shard_value.OpIdxMap {
 						kv.OpIndexmap[shardID][k] = v
 					}
+					kv.ShardConfigNum[shardID] = op.ConfigNum
 					delete(kv.ShardMigrations[shardID], op.ConfigNum)
 				} else {
 					if op.From == 0 {
 						DPrintf("[Group %v Server %v] Create Shard %v", kv.gid, kv.me, shardID)
 						kv.ShardData[shardID] = make(map[string]string)
+						kv.ShardConfigNum[shardID] = op.ConfigNum
 					} else {
 						return
 					}
@@ -529,21 +543,23 @@ func (kv *ShardKV) receiver() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
 					ret_msg.err = OK
-					_, ok := kv.ShardMigrations[op.ShardID][op.ConfigNum]
-					if ok {
-						DPrintf("[Group %v Server %v] Recv old migration op for shard %v config %v", kv.gid, kv.me, op.ShardID, op.ConfigNum)
-					} else {
-						DPrintf("[Attention] [Group %v Server %v] make shard migration data for shard %v config %v", kv.gid, kv.me, op.ShardID, op.ConfigNum)
-						_, ok1 := kv.ShardMigrations[op.ShardID]
-						if !ok1 {
-							kv.ShardMigrations[op.ShardID] = make(map[int]MigrationData)
-						}
-						kv.ShardMigrations[op.ShardID][op.ConfigNum] = MigrationData{ShardData: make(map[string]string), OpIdxMap: make(map[int64]int)}
-						for k, v := range op.Shard.ShardData {
-							kv.ShardMigrations[op.ShardID][op.ConfigNum].ShardData[k] = v
-						}
-						for k, v := range op.Shard.OpIdxMap {
-							kv.ShardMigrations[op.ShardID][op.ConfigNum].OpIdxMap[k] = v
+					if kv.ShardConfigNum[op.ShardID] < op.ConfigNum {
+						_, ok := kv.ShardMigrations[op.ShardID][op.ConfigNum]
+						if ok {
+							DPrintf("[Group %v Server %v] Recv old migration op for shard %v config %v", kv.gid, kv.me, op.ShardID, op.ConfigNum)
+						} else {
+							DPrintf("[Attention] [Group %v Server %v] make shard migration data for shard %v config %v", kv.gid, kv.me, op.ShardID, op.ConfigNum)
+							_, ok1 := kv.ShardMigrations[op.ShardID]
+							if !ok1 {
+								kv.ShardMigrations[op.ShardID] = make(map[int]MigrationData)
+							}
+							kv.ShardMigrations[op.ShardID][op.ConfigNum] = MigrationData{ShardData: make(map[string]string), OpIdxMap: make(map[int64]int)}
+							for k, v := range op.Shard.ShardData {
+								kv.ShardMigrations[op.ShardID][op.ConfigNum].ShardData[k] = v
+							}
+							for k, v := range op.Shard.OpIdxMap {
+								kv.ShardMigrations[op.ShardID][op.ConfigNum].OpIdxMap[k] = v
+							}
 						}
 					}
 					ch_list, ok := kv.pendingChannel[msg.CommandIndex]
@@ -569,6 +585,8 @@ func (kv *ShardKV) receiver() {
 					e.Encode(kv.ShardJobs)
 					e.Encode(kv.LastConfig)
 					e.Encode(kv.ShardMigrations)
+					e.Encode(kv.ShardConfigNum)
+					// fmt.Printf("group %v server %v config %v migrations %v\n", kv.gid, kv.me, kv.ShardConfigNum, kv.ShardMigrations)
 					data := w.Bytes()
 					kv.rf.Snapshot(kv.LastApplyIndex, data)
 				}
@@ -587,6 +605,7 @@ func (kv *ShardKV) receiver() {
 					kv.ShardJobs = snapshot.ShardJobs
 					kv.LastConfig = snapshot.LastConfig
 					kv.ShardMigrations = snapshot.ShardMigrations
+					kv.ShardConfigNum = snapshot.ShardConfigNum
 				}
 				ret_msg := PendingListen{}
 				msg1 := raft.ApplyMsg{}
@@ -673,6 +692,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.sm = shardctrler.MakeClerk(ctrlers)
 	kv.ShardJobs = make(map[int][]raft.ApplyMsg)
 	kv.ShardMigrations = make(map[int]map[int]MigrationData)
+	kv.ShardConfigNum = make(map[int]int)
 	for i := range kv.LastConfig.Shards {
 		kv.OpIndexmap[i] = make(map[int64]int)
 	}
