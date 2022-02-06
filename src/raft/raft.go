@@ -246,17 +246,19 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("[Install] server %v index %v", rf.me, index)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.LastIncludedIndex >= index {
+	if rf.LastIncludedIndex > index {
 		return
 	}
 	rf.CurrentSnapShot = snapshot
-	rf.LastIncludedIndex = index
-	for idx := range rf.Logs {
-		if rf.Logs[idx].Index == index {
-			rf.LastIncludedTerm = rf.Logs[idx].Term
-			rf.Logs = rf.Logs[idx+1:]
-			DPrintf("[Install] sucess")
-			break
+	if rf.LastIncludedIndex < index {
+		rf.LastIncludedIndex = index
+		for idx := range rf.Logs {
+			if rf.Logs[idx].Index == index {
+				rf.LastIncludedTerm = rf.Logs[idx].Term
+				rf.Logs = rf.Logs[idx+1:]
+				DPrintf("[Install] sucess")
+				break
+			}
 		}
 	}
 	rf.persist()

@@ -470,6 +470,7 @@ func (kv *ShardKV) receiver() {
 				func() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
+					kv.LastApplyIndex = msg.CommandIndex
 					shard := key2shard(op.Key)
 					gid := kv.LastConfig.Shards[shard]
 					if gid != kv.gid {
@@ -492,6 +493,7 @@ func (kv *ShardKV) receiver() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
 					ret_msg.err = OK
+					kv.LastApplyIndex = msg.CommandIndex
 					if op.ConfigNum < kv.LastConfig.Num {
 						DPrintf("[Group %v Server %v] Try to install a old config, old num %v, now num %v", kv.gid, kv.me, op.ConfigNum, kv.LastConfig.Num)
 						return
@@ -543,6 +545,7 @@ func (kv *ShardKV) receiver() {
 					kv.mu.Lock()
 					defer kv.mu.Unlock()
 					ret_msg.err = OK
+					kv.LastApplyIndex = msg.CommandIndex
 					if kv.ShardConfigNum[op.ShardID] < op.ConfigNum {
 						_, ok := kv.ShardMigrations[op.ShardID][op.ConfigNum]
 						if ok {
@@ -571,27 +574,6 @@ func (kv *ShardKV) receiver() {
 					}
 				}()
 			}
-			kv.mu.Lock()
-			kv.LastApplyIndex = msg.CommandIndex
-			if kv.maxraftstate != -1 {
-				nowsize := kv.rf.GetStateSize()
-				if kv.maxraftstate-nowsize <= 100 {
-					w := new(bytes.Buffer)
-					e := labgob.NewEncoder(w)
-					e.Encode(kv.LastApplyIndex)
-					e.Encode(kv.LastTerm)
-					e.Encode(kv.ShardData)
-					e.Encode(kv.OpIndexmap)
-					e.Encode(kv.ShardJobs)
-					e.Encode(kv.LastConfig)
-					e.Encode(kv.ShardMigrations)
-					e.Encode(kv.ShardConfigNum)
-					// fmt.Printf("group %v server %v config %v migrations %v\n", kv.gid, kv.me, kv.ShardConfigNum, kv.ShardMigrations)
-					data := w.Bytes()
-					kv.rf.Snapshot(kv.LastApplyIndex, data)
-				}
-			}
-			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
 			kv.mu.Lock()
 			snapshot := kv.decodeSnapshot(msg.Snapshot)
@@ -624,6 +606,38 @@ func (kv *ShardKV) receiver() {
 			}
 			kv.mu.Unlock()
 		}
+	}
+}
+
+func (kv *ShardKV) makeSnapShot() {
+	kv.mu.Lock()
+	if kv.maxraftstate != -1 {
+		nowsize := kv.rf.GetStateSize()
+		if kv.maxraftstate-nowsize <= 100 {
+			w := new(bytes.Buffer)
+			e := labgob.NewEncoder(w)
+			e.Encode(kv.LastApplyIndex)
+			e.Encode(kv.LastTerm)
+			e.Encode(kv.ShardData)
+			e.Encode(kv.OpIndexmap)
+			e.Encode(kv.ShardJobs)
+			e.Encode(kv.LastConfig)
+			e.Encode(kv.ShardMigrations)
+			e.Encode(kv.ShardConfigNum)
+			w1 := new(bytes.Buffer)
+			e1 := labgob.NewEncoder(w1)
+			e1.Encode(kv.ShardData)
+			data := w.Bytes()
+			kv.rf.Snapshot(kv.LastApplyIndex, data)
+		}
+	}
+	kv.mu.Unlock()
+}
+
+func (kv *ShardKV) applier() {
+	for !kv.killed() {
+		time.Sleep(50 * time.Millisecond)
+		kv.makeSnapShot()
 	}
 }
 
@@ -710,5 +724,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	for i := range kv.LastConfig.Shards {
 		go kv.shardWorker(i)
 	}
+	go kv.applier()
 	return kv
 }
