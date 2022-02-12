@@ -32,6 +32,7 @@ const (
 type Job struct {
 	Job_id      int
 	Worker_id   int
+	Real_worker int
 	Job_status  JOBSTATUS
 	Input_files []string
 }
@@ -58,6 +59,12 @@ func (c *Coordinator) Map_Job_Monitor(idx int) {
 	if c.job_list[idx].Job_status != JOBDONE {
 		// fmt.Println("map fail", c.job_list[idx].Worker_id)
 		c.job_list[idx].Job_status = NOWORKER
+		for i := range c.worker_list {
+			if c.worker_list[i] == c.job_list[idx].Real_worker {
+				c.worker_list = append(c.worker_list[:i], c.worker_list[i+1:]...)
+				break
+			}
+		}
 	}
 	c.mu.Unlock()
 }
@@ -111,6 +118,7 @@ func (c *Coordinator) Map_Trigger(args *MapTriggerArgs, reply *MapTriggerReply) 
 			reply.Job_id = job.Job_id
 			job.Job_status = PROCESSING
 			job.Worker_id = args.Worker_id
+			job.Real_worker = args.Worker_id
 			// fmt.Printf("Job id %v worker %v reply %v\n", reply.Job_id, args.Worker_id, reply.Reply_type)
 			c.mu.Unlock()
 			go c.Map_Job_Monitor(idx)
@@ -171,6 +179,7 @@ func (c *Coordinator) Reduce_Trigger(args *ReduceTriggerArgs, reply *ReduceTrigg
 			reply.Files = job.Input_files
 			reply.Job_id = job.Job_id
 			reply.Worker_id = job.Worker_id
+			job.Real_worker = args.Worker_id
 			job.Job_status = PROCESSING
 			c.mu.Unlock()
 			go c.Reduce_Job_Monitor(idx)
